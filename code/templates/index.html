@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Detection Results</title>
+  <style>
+    table {
+      border-collapse: collapse;
+      width: 80%;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px;
+    }
+    th {
+      background-color: #f8f8f8;
+    }
+    /* Layout side-by-side feed and table */
+    .feed-container {
+      display: flex;
+      gap: 20px;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+<h1>Live Object Detection</h1>
+
+<div class="feed-container">
+  <!-- Left: Canvas feed for bounding-box video -->
+  <div>
+    <h2>Detection Feed</h2>
+    <canvas id="detection-feed" width="640" height="480" style="border: 1px solid #ccc;"></canvas>
+  </div>
+
+  <!-- Right: Table of detection results -->
+  <div>
+    <h2>Detections</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Score</th>
+          <th>Bounding Box</th>
+        </tr>
+      </thead>
+      <tbody id="results-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// Function to fetch and render video frames on the canvas
+function renderVideoFeed() {
+  const canvas = document.getElementById('detection-feed');
+  const ctx = canvas.getContext('2d');
+  const img = new Image();
+
+  // Load the frame and draw it on the canvas
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  };
+
+  // Periodically fetch the latest frame from /video_feed
+  setInterval(() => {
+    img.src = '/video_feed?' + new Date().getTime(); // Add timestamp to bypass caching
+  }, 100); // Fetch every 100ms (~10 FPS)
+}
+
+// Function to fetch and update detection results in the table
+function updateDetections() {
+  fetch('/api/results')
+    .then(response => response.json())
+    .then(data => {
+      const tableBody = document.getElementById('results-tbody');
+      // Clear existing rows
+      tableBody.innerHTML = '';
+
+      data.forEach(entry => {
+        entry.detections.forEach(det => {
+          const row = document.createElement('tr');
+
+          // Label cell
+          const labelCell = document.createElement('td');
+          labelCell.innerText = det.label_name;
+          row.appendChild(labelCell);
+
+          // Score cell
+          const scoreCell = document.createElement('td');
+          scoreCell.innerText = det.score.toFixed(2);
+          row.appendChild(scoreCell);
+
+          // Bounding box cell
+          const bboxCell = document.createElement('td');
+          bboxCell.innerText = det.bbox;
+          row.appendChild(bboxCell);
+
+          tableBody.appendChild(row);
+        });
+      });
+    })
+    .catch(err => console.error('Error fetching /api/results:', err));
+}
+
+// Start rendering the video feed and updating detections
+renderVideoFeed();
+setInterval(updateDetections, 1000); // Update detections every second
+</script>
+
+</body>
+</html>

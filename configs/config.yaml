@@ -1,0 +1,18 @@
+# config.yaml
+
+pipeline:
+  input_sources:  # Webcam or other default source (unused if we're using Arduino’s IP)
+    "0"
+  output_path: "./outputs"
+  save_detections: true
+
+model:
+  confidence_threshold: 0.5
+  pretrained: "COCO_V1"
+
+rate_limiter:
+  enable: false
+  interval_seconds: 2
+
+web_server:
+  enable: true
