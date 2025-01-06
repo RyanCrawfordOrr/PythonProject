@@ -1,11 +1,12 @@
 # postprocess.py
+
 import time
 import cv2
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-LAST_FRAME = None
+# Removed the global LAST_FRAME reference.
 
 class RateLimiter:
     def __init__(self, interval=5.0):
@@ -32,14 +33,17 @@ for name, module in sys.modules.items():
         except:
             pass
 
-def process_input_source(input_source, detector, cfg, rl, output_path, save_detections, results_storage):
+
+def process_input_source(input_source, detector, cfg, rl, output_path,
+                         save_detections, results_storage, shared_frames_dict):
     """
     Reads frames from input_source, runs 'detector.detect', displays with draw_boxes,
     saves detections if requested, and appends results to 'results_storage' for Flask.
     Automatically attempts to re-connect if the stream fails or times out.
-    """
-    global LAST_FRAME
 
+    Instead of using a global LAST_FRAME, we store the latest drawn frame in
+    shared_frames_dict[input_source].
+    """
     while True:
         # Attempt to open the stream
         cap = cv2.VideoCapture(input_source)
@@ -51,7 +55,6 @@ def process_input_source(input_source, detector, cfg, rl, output_path, save_dete
 
         print(f"[INFO] Successfully opened {input_source}. Starting frame loop...")
 
-        # We'll track whether we've seen our first valid frame
         first_frame_received = False
 
         while True:
@@ -74,11 +77,13 @@ def process_input_source(input_source, detector, cfg, rl, output_path, save_dete
             detections = detector.detect(frame)
             frame_drawn = draw_boxes(frame.copy(), detections)
 
+            # ------------------------------------------------------------------------------
+            # Instead of setting a global LAST_FRAME, we store the latest frame in a dict.
+            # ------------------------------------------------------------------------------
+            shared_frames_dict[input_source] = frame_drawn.copy()
+
             # Show local window (if desired)
             cv2.imshow(f"Detections - {input_source}", frame_drawn)
-
-            # Update LAST_FRAME for the Flask feed
-            LAST_FRAME = frame_drawn.copy()
 
             # Convert numpy -> Python types for storage
             for det in detections:
@@ -109,13 +114,13 @@ def process_input_source(input_source, detector, cfg, rl, output_path, save_dete
                 cv2.destroyAllWindows()
                 return  # Exit the function entirely
 
-    # End while True (outer)
-    # We'll keep looping until user quits or the program is stopped.
 
-def run_concurrent_processing(input_sources, detector, cfg, rl, output_path, save_detections, results_storage):
+def run_concurrent_processing(input_sources, detector, cfg, rl, output_path,
+                              save_detections, results_storage, shared_frames_dict):
     """
     Spawns threads to process each input source in parallel. We pass 'results_storage'
-    so each source can store detection data for the Flask server.
+    so each source can store detection data for the Flask server, and 'shared_frames_dict'
+    so each source can update its "last drawn frame" that will be used by generate_frames.
     """
     if not input_sources:
         print("[run_concurrent_processing] No input sources. Nothing to do.")
@@ -125,8 +130,14 @@ def run_concurrent_processing(input_sources, detector, cfg, rl, output_path, sav
         futures = [
             executor.submit(
                 process_input_source,
-                src, detector, cfg, rl, output_path, save_detections,
-                results_storage
+                src,
+                detector,
+                cfg,
+                rl,
+                output_path,
+                save_detections,
+                results_storage,
+                shared_frames_dict
             ) for src in input_sources
         ]
         for future in as_completed(futures):
@@ -135,7 +146,11 @@ def run_concurrent_processing(input_sources, detector, cfg, rl, output_path, sav
             except Exception as e:
                 print(f"Error processing input source: {e}")
 
+
 def save_detection(image, bbox, score, label_name, output_path):
+    """
+    Crops the detection region from the image and saves it to disk.
+    """
     x_min, y_min, x_max, y_max = map(int, bbox)
     cropped_img = image[y_min:y_max, x_min:x_max]
 
@@ -144,7 +159,11 @@ def save_detection(image, bbox, score, label_name, output_path):
 
     cv2.imwrite(filepath, cropped_img)
 
+
 def draw_boxes(image, detections):
+    """
+    Draws bounding boxes and labels on the given image.
+    """
     for det in detections:
         bbox = det["bbox"]
         score = det["score"]

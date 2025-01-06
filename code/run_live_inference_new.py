@@ -1,15 +1,10 @@
-"""
-run_live_inference_new.py
---------------------------------
-- No local input sources: we rely 100% on discovering Arduino(s).
-- Performs a one-time handshake with the first Arduino:
-    1) Arduino broadcasts "UNO_R4 IP:<ArduinoIP>" on UDP 4210.
-    2) Python replies "PC IP:<LocalPCIP>" once.
-    3) Adds "http://<ArduinoIP>/" to the input sources for object detection.
-- (Optional) starts a Flask web server to show results.
-- Now includes a live bounding-box feed at /video_feed so you can embed
-  <img src="/video_feed"> on the webpage.
-"""
+# run_live_inference_new.py
+# ---------------------------------------------------------------------
+# - No local input sources: we rely on discovering Arduino(s).
+# - Once we have the Arduino IP, we add its MJPEG stream to input_sources.
+# - We optionally launch a Flask server to serve a live bounding-box feed at /video_feed.
+# - We removed 'LAST_FRAME' references. Instead, we store the latest frames in 'shared_frames_dict'.
+# ---------------------------------------------------------------------
 
 import socket
 import time
@@ -21,12 +16,13 @@ from flask import Flask, jsonify, render_template, Response
 import torch
 from torchvision.models.detection import RetinaNet_ResNet50_FPN_Weights
 
-# Your existing code references
+# References to your local modules
 from core_detector import Detector
+# Note: No more "from postprocess import LAST_FRAME".
 from postprocess import (
     RateLimiter,
     run_concurrent_processing,
-    LAST_FRAME,
+    # We do not import LAST_FRAME anymore
 )
 
 ########################################################################
@@ -35,12 +31,10 @@ from postprocess import (
 
 DISCOVERED_ARDUINO_IP = None
 LOCK = threading.Lock()
-WAIT_FOR_ARDUINO_SECS = 1000  # how long main() waits for handshake to complete
-
-# This event signals the Flask generator that frames are ready
+WAIT_FOR_ARDUINO_SECS = 1000  # how long main() waits for handshake
 STREAM_READY = threading.Event()
 
-## ADDED: a global reference to the handshake socket so we can close it in main()
+# We'll store a global reference to the socket for cleanup
 HANDSHAKE_SOCKET = None
 
 ########################################################################
@@ -63,7 +57,7 @@ def handshake_listener_once(udp_port=4210):
     """
     Listen on udp_port for exactly ONE "UNO_R4 IP:<ArduinoIP>" broadcast.
     Once received, respond with "PC IP:<myLocalIP>", store the Arduino IP,
-    then CLOSE the socket and exit this thread.
+    then close the socket and exit this thread.
     """
     my_ip = get_local_ip()
     print(f"[HandshakeListener] PC local IP = {my_ip}")
@@ -71,13 +65,9 @@ def handshake_listener_once(udp_port=4210):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # **CHANGE**: Optionally sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    # if needed to receive broadcast on certain OSes.
-
     sock.bind(("", udp_port))
     print(f"[HandshakeListener] Listening for one broadcast on UDP port {udp_port}...")
 
-    ## ADDED: Store the socket in a global so we can close it on abrupt stops
     global HANDSHAKE_SOCKET
     HANDSHAKE_SOCKET = sock
 
@@ -90,7 +80,6 @@ def handshake_listener_once(udp_port=4210):
             # e.g. "UNO_R4 IP:192.168.1.50"
             if message.startswith("UNO_R4 IP:"):
                 possible_ip = message.split("UNO_R4 IP:")[1].strip()
-                # Very basic IP check
                 if len(possible_ip.split(".")) == 4:
                     print(f"[HandshakeListener] Received Arduino IP '{possible_ip}' from {sender_ip}:{sender_port}")
 
@@ -107,45 +96,39 @@ def handshake_listener_once(udp_port=4210):
                         global DISCOVERED_ARDUINO_IP
                         DISCOVERED_ARDUINO_IP = possible_ip
 
-                    # Close the socket right away now that we have the IP
+                    # Close the socket
                     sock.close()
                     HANDSHAKE_SOCKET = None
                     print("[HandshakeListener] Handshake done, exiting listener thread.")
                     return
-
         except Exception as ex:
             print(f"[HandshakeListener] Error while reading from socket: {ex}")
-            time.sleep(1)  # Just avoid spamming if there's an error
+            time.sleep(1)
 
 ########################################################################
 # (New) Functions for Serving the Live Video Feed
 ########################################################################
 
-def generate_frames():
+def generate_frames(shared_frames_dict, source_key):
     """
-    A generator function that yields MJPEG frames from LAST_FRAME.
-    We rely on code in postprocess.py to keep LAST_FRAME updated
-    with the bounding-box visuals.
+    A generator function that yields MJPEG frames from shared_frames_dict[source_key].
+    This replaces the old approach of using a global LAST_FRAME.
     """
     while True:
-        if LAST_FRAME is not None:
-            ret, buffer = cv2.imencode('.jpg', LAST_FRAME)
+        frame_to_stream = shared_frames_dict.get(source_key, None)
+        if frame_to_stream is not None:
+            ret, buffer = cv2.imencode('.jpg', frame_to_stream)
             if ret:
-                print("[DEBUG] Successfully encoded frame.")
                 frame_bytes = buffer.tobytes()
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            else:
-                print("[ERROR] Frame encoding failed.")
-        else:
-            print("[DEBUG] LAST_FRAME is None.")
         time.sleep(0.05)  # ~20 FPS
 
 ########################################################################
 # Optional: Start a Flask web server to display detection results
 ########################################################################
 
-def start_web_server(results_storage):
+def start_web_server(results_storage, shared_frames_dict, source_key):
     app = Flask(__name__)
 
     @app.route('/')
@@ -163,7 +146,7 @@ def start_web_server(results_storage):
         """
         print("[INFO] /video_feed route accessed.")
         return Response(
-            generate_frames(),
+            generate_frames(shared_frames_dict, source_key),
             mimetype='multipart/x-mixed-replace; boundary=frame'
         )
 
@@ -179,7 +162,6 @@ def start_web_server(results_storage):
 ########################################################################
 
 def main():
-    ## ADDED: Wrap main logic in try/finally so we can close socket on abrupt stops
     global HANDSHAKE_SOCKET
     try:
         # 1) Load config
@@ -206,11 +188,13 @@ def main():
             rl = RateLimiter(cfg["rate_limiter"]["interval_seconds"])
 
         # 3) Start handshake listener in background
-        listener_thread = threading.Thread(target=handshake_listener_once, args=(4210,), daemon=True)
+        listener_thread = threading.Thread(
+            target=handshake_listener_once, args=(4210,), daemon=True
+        )
         listener_thread.start()
 
         # 4) Wait up to WAIT_FOR_ARDUINO_SECS for the Arduino IP
-        print(f"[Main] Waiting up to {WAIT_FOR_ARDUINO_SECS}s for the first handshake broadcast.")
+        print(f"[Main] Waiting up to {WAIT_FOR_ARDUINO_SECS}s for the handshake broadcast.")
         arduino_ip = None
         start_wait = time.time()
 
@@ -236,20 +220,29 @@ def main():
         output_path = cfg["pipeline"]["output_path"]
         save_detections = cfg["pipeline"]["save_detections"]
 
-        # 6) Start Flask server in separate thread if enabled
+        # 6) Create a shared dict for each camera feed's latest frame
+        shared_frames_dict = {}  # e.g. {"http://192.168.1.50/": last_frame_np_array}
+
+        # For storing detection results across all streams (shown on the web UI)
         results_storage = []
+
+        # 7) Start the Flask server in a separate thread if enabled
         if cfg["web_server"]["enable"]:
             print("[Main] Starting the web server.")
+            # If you have multiple input sources, pick one to display or add multiple endpoints
+            if input_sources:
+                source_key = input_sources[0]  # Just pick the first for demonstration
+            else:
+                source_key = "default"
+
             web_server_thread = threading.Thread(
                 target=start_web_server,
-                args=(results_storage,),
+                args=(results_storage, shared_frames_dict, source_key),
                 daemon=True
             )
             web_server_thread.start()
 
-        # 7) Start the concurrency for input streams
-        print("[Main] Initializing stream processing.")
-
+        # 8) Start concurrent stream processing in a background thread
         def streaming_thread():
             run_concurrent_processing(
                 input_sources,
@@ -258,13 +251,14 @@ def main():
                 rl,
                 output_path,
                 save_detections,
-                results_storage
+                results_storage,
+                shared_frames_dict
             )
 
         processing_thread = threading.Thread(target=streaming_thread, daemon=True)
         processing_thread.start()
 
-        # Idle here forever (the concurrency threads never return)
+        # 9) Idle here
         while True:
             time.sleep(1)
 
