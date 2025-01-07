@@ -82,8 +82,8 @@ def process_input_source(input_source, detector, cfg, rl, output_path,
             # ------------------------------------------------------------------------------
             shared_frames_dict[input_source] = frame_drawn.copy()
 
-            # Show local window (if desired)
-            cv2.imshow(f"Detections - {input_source}", frame_drawn)
+            # Show local window (for debug only)
+            #cv2.imshow(f"Detections - {input_source}", frame_drawn)
 
             # Convert numpy -> Python types for storage
             for det in detections:

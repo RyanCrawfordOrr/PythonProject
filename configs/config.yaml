@@ -2,7 +2,7 @@
 
 pipeline:
   input_sources:  # Webcam or other default source (unused if we're using Arduino’s IP)
-    "0"
+    ["0"]
   output_path: "./outputs"
   save_detections: true
 

@@ -1,6 +1,6 @@
 # run_live_inference_new.py
 # ---------------------------------------------------------------------
-# - No local input sources: we rely on discovering Arduino(s).
+# - We rely on discovering Arduino(s) for an MJPEG stream.
 # - Once we have the Arduino IP, we add its MJPEG stream to input_sources.
 # - We optionally launch a Flask server to serve a live bounding-box feed at /video_feed.
 # - We removed 'LAST_FRAME' references. Instead, we store the latest frames in 'shared_frames_dict'.
@@ -18,7 +18,6 @@ from torchvision.models.detection import RetinaNet_ResNet50_FPN_Weights
 
 # References to your local modules
 from core_detector import Detector
-# Note: No more "from postprocess import LAST_FRAME".
 from postprocess import (
     RateLimiter,
     run_concurrent_processing,
@@ -112,7 +111,6 @@ def handshake_listener_once(udp_port=4210):
 def generate_frames(shared_frames_dict, source_key):
     """
     A generator function that yields MJPEG frames from shared_frames_dict[source_key].
-    This replaces the old approach of using a global LAST_FRAME.
     """
     while True:
         frame_to_stream = shared_frames_dict.get(source_key, None)
@@ -207,7 +205,7 @@ def main():
                 break
             time.sleep(0.5)
 
-        # 5) Build input_sources
+        # 5) Build input_sources based on discovered Arduino
         input_sources = []
         if arduino_ip:
             mjpeg_url = f"http://{arduino_ip}/"
@@ -215,7 +213,7 @@ def main():
             input_sources.append(mjpeg_url)
         else:
             print(f"[Main] No Arduino IP discovered after {WAIT_FOR_ARDUINO_SECS}s.")
-            print("[Main] There are no local sources either. Running with empty input sources.")
+            print("[Main] Running with empty input sources (no camera streams).")
 
         output_path = cfg["pipeline"]["output_path"]
         save_detections = cfg["pipeline"]["save_detections"]
@@ -229,9 +227,9 @@ def main():
         # 7) Start the Flask server in a separate thread if enabled
         if cfg["web_server"]["enable"]:
             print("[Main] Starting the web server.")
-            # If you have multiple input sources, pick one to display or add multiple endpoints
+            # If you have multiple input sources, you could pick one to display or add multiple endpoints
             if input_sources:
-                source_key = input_sources[0]  # Just pick the first for demonstration
+                source_key = input_sources[0]  # Just pick the first discovered Arduino
             else:
                 source_key = "default"
 
