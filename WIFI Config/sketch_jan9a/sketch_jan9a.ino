@@ -26,7 +26,7 @@
    If CURRENT_FW_VERSION differs from what we read in the EEPROM,
    we wipe the EEPROM to ensure a fresh start (prevents weird mismatches).
 */
-const uint8_t CURRENT_FW_VERSION = 14;
+const uint8_t CURRENT_FW_VERSION = 17;
 
 /* -------------------------------------------------------------------------
    AP Configuration
@@ -86,7 +86,7 @@ bool masterAPConfigured = false;
 unsigned long masterStateChangeTime = 0;
 
 // You can increase this to give more time for Slaves to connect.
-const unsigned long masterConfiguredAPDuration = 45000; // 45s window
+const unsigned long masterConfiguredAPDuration = 90000; // 90s window
 
 bool masterReconnectPending = false;
 unsigned long masterReconnectTime = 0;
@@ -404,7 +404,6 @@ void loop() {
           if (millis() - slaveCredentialsReceivedTime > slaveCredentialTimeout) {
             Serial.println("All slaves likely have credentials. Final connect...");
             slaveCredentialsReceived = false;
-            connectToWiFi();
           }
         }
       }
@@ -644,7 +643,7 @@ void sendCredentials(WiFiClient& client) {
 void parseAndSaveCredentials(const String& request, WiFiClient& client) {
   Serial.println("Parsing /save request to store new credentials...");
 
-  // Check if there's a query string (?)
+  // Check if there's a query string
   int qStart = request.indexOf("?");
   if (qStart == -1) {
     Serial.println("No query in /save request.");
@@ -665,20 +664,20 @@ void parseAndSaveCredentials(const String& request, WiFiClient& client) {
     sendConfigPage(client, "Malformed request, missing SSID or Pass.");
     return;
   }
-  ssidStart += 5; // Skip "ssid="
-  passStart += 5; // Skip "pass="
+  ssidStart += 5; // skip "ssid="
+  passStart += 5; // skip "pass="
 
-  // Determine the end positions (could be an '&' or the end of the string)
+  // Determine end positions (& or end of string)
   int ssidEnd = query.indexOf('&', ssidStart);
   if (ssidEnd == -1) ssidEnd = query.length();
   int passEnd = query.indexOf('&', passStart);
   if (passEnd == -1) passEnd = query.length();
 
-  // Extract the raw SSID and Password from the query
+  // Extract raw SSID/Password
   String newSSID = query.substring(ssidStart, ssidEnd);
   String newPass = query.substring(passStart, passEnd);
 
-  // URL-decode them (handle %20, etc.) and trim whitespace
+  // URL-decode and trim
   newSSID = urlDecode(newSSID);
   newPass = urlDecode(newPass);
   newSSID.trim();
@@ -689,7 +688,7 @@ void parseAndSaveCredentials(const String& request, WiFiClient& client) {
   Serial.print("Parsed Password: ");
   Serial.println(newPass);
 
-  // Validate the SSID and Password format
+  // Validate format
   if (!isValidCredential(newSSID.c_str(), true)) {
     sendConfigPage(client, "Invalid SSID (must be 1..32 printable chars).");
     return;
@@ -699,40 +698,80 @@ void parseAndSaveCredentials(const String& request, WiFiClient& client) {
     return;
   }
 
-  // -------------------------------
-  // ALWAYS OVERWRITE OLD CREDENTIALS
-  // -------------------------------
-  // Because we validated them, we consider them correct. We store them in EEPROM
-  // so next time we start up, we have them as valid.
-  newSSID.toCharArray(storedSSID, sizeof(storedSSID));
-  newPass.toCharArray(storedPass, sizeof(storedPass));
+  // ----------------------------------------------------------
+  // 1) CLOSE the old/unconfigured AP before STA testing
+  // ----------------------------------------------------------
+  Serial.println("Shutting down any existing AP, then testing new credentials...");
 
-  // Write them to EEPROM
-  EEPROM.put(SSID_ADDR, storedSSID);
-  EEPROM.put(PASS_ADDR, storedPass);
-  EEPROM.update(VALID_FLAG_ADDR, 1); // Mark as valid
-  credentialsValid = true;
-
-  // Now that we have new router credentials, we become a "Configured Master"
-  // We kill the old AP, and start a new AP with "ArduinoMasterAP_Configured"
-  Serial.println("Closing Unconfigured AP...");
+  // If we were in AP mode, this call typically stops it:
   WiFi.disconnect();
   delay(1000);
 
-  Serial.println("Starting 'Configured Master' AP, for Slaves to retrieve credentials...");
-  startAccessPoint(CONFIGURED_MASTER_SSID, CONFIGURED_MASTER_PASSWORD);
-  masterAPConfigured = true;
-  masterStateChangeTime = millis();
+  // ----------------------------------------------------------
+  // 2) Attempt STA connection to see if credentials are correct
+  // ----------------------------------------------------------
+  Serial.println("Attempting to connect in station mode...");
+  WiFi.begin(newSSID.c_str(), newPass.c_str());
 
-  // In 60s (masterConfiguredAPDuration), we will shut this AP off and connect
-  // to the router ourselves
-  masterReconnectPending = true;
-  masterReconnectTime = masterStateChangeTime + masterConfiguredAPDuration;
+  const int maxConnectAttempts = 20;  // 20 * 500ms = 10s
+  int connectAttempts = 0;
+  while (WiFi.status() != WL_CONNECTED && connectAttempts < maxConnectAttempts) {
+    delay(500);
+    connectAttempts++;
+    Serial.print(".");
+  }
+  Serial.println();
 
-  // Finally, send an HTML confirmation to the user
-  sendConfirmationPage(client,
-    "Credentials saved! Master is now in AP mode for 60s so Slaves can connect. After that, I will join the router.");
+  if (WiFi.status() == WL_CONNECTED) {
+    // ----------------------------------------------------------
+    // If we connected, the credentials are confirmed to be good
+    // ----------------------------------------------------------
+    Serial.println("Connection succeeded with new credentials!");
+    Serial.print("Got IP: ");
+    Serial.println(WiFi.localIP());
+
+    // Save them permanently
+    newSSID.toCharArray(storedSSID, sizeof(storedSSID));
+    newPass.toCharArray(storedPass, sizeof(storedPass));
+    EEPROM.put(SSID_ADDR, storedSSID);
+    EEPROM.put(PASS_ADDR, storedPass);
+    EEPROM.update(VALID_FLAG_ADDR, 1);
+    credentialsValid = true;
+
+    // Disconnect from router so we can run the Configured Master AP
+    Serial.println("Disconnecting from router to start 'Configured Master' AP...");
+    WiFi.disconnect();
+    delay(500);
+
+    startAccessPoint(CONFIGURED_MASTER_SSID, CONFIGURED_MASTER_PASSWORD);
+    masterAPConfigured = true;
+    masterStateChangeTime = millis();
+
+    // We'll kill this AP in 60s so Master can join the router itself
+    masterReconnectPending = true;
+    masterReconnectTime = masterStateChangeTime + masterConfiguredAPDuration;
+
+    // Send a success page to the user
+    sendConfirmationPage(client,
+      "Credentials verified! Master is now in AP mode so Slaves can connect. "
+      "After 60s, I'll rejoin the router.");
+  } else {
+    // ----------------------------------------------------------
+    // If we cannot connect, revert to Unconfigured AP
+    // ----------------------------------------------------------
+    Serial.println("Connection failed. Provided SSID/PASS invalid or unreachable.");
+    Serial.println("Restarting 'Unconfigured Master' AP.");
+
+    // Start the original AP again so the user can retry
+    startAccessPoint(MASTER_SSID, MASTER_PASSWORD);
+
+    // Inform the user on the browser
+    sendConfigPage(client,
+      "Failed to connect with provided SSID/PASS! Reverted to Unconfigured AP. "
+      "Please try again.");
+  }
 }
+
 
 /* -------------------------------------------------------------------------
    isValidCredential(const char* credential, bool isSSID)
