@@ -277,7 +277,9 @@ void handleHttpClient(WiFiClient &client)
       Serial.println("Capture failed or client disconnected.");
       break;
     }
-    delay(.3);
+    // delay takes milliseconds as an integer. Using a float causes the delay
+    // to truncate to zero. Use a small integer delay instead.
+    delay(30);
   }
   
   // Once we exit the loop, either the client disconnected or error occurred
